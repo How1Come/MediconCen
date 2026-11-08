@@ -2,7 +2,7 @@
 
 NestJS and TypeScript project for resolving an ordered pair of identifiers to a persistent user ID in MySQL.
 
-The current stage provides a validated POST endpoint, UUID v4 generation, MySQL persistence, duplicate-request handling, Redis caching, and automated unit and integration tests. Docker packaging and OpenAPI documentation are scheduled for later stages.
+The project provides a validated POST endpoint, UUID v4 generation, MySQL persistence, duplicate-request handling, Redis caching, automated unit and integration tests, and Docker packaging. OpenAPI documentation is scheduled for the final stage.
 
 ## Prerequisites
 
@@ -11,6 +11,48 @@ The current stage provides a validated POST endpoint, UUID v4 generation, MySQL 
 - Redis for caching; the application also runs with Redis unavailable or explicitly disabled.
 
 The setup below uses [MySQL-generated passwords](https://dev.mysql.com/doc/refman/8.0/en/password-management.html), available from 8.0.18.
+
+## Run with Docker Compose
+
+Docker Engine with Compose 2.20 or later can run the complete stack without installing Node.js, MySQL, or Redis on the host. Start Docker, then configure the ignored environment file:
+
+```bash
+cp .env.example .env
+```
+
+Set `MYSQL_PASSWORD` and `MYSQL_ROOT_PASSWORD` to distinct, nonempty passwords. Generate each value locally with `openssl rand -hex 32`, then paste it into `.env`. The root password is used only by the MySQL container; it is not passed to the API or migration container. An optional `REDIS_PASSWORD` configures the bundled Redis default user and the application's connection. Use single quotes around passwords containing `$` or `#` to preserve them during Compose interpolation. Do not commit the populated file.
+
+```bash
+docker compose up --build --detach --wait
+docker compose ps --all
+```
+
+The multi-stage build compiles TypeScript and installs production dependencies separately. The final Node.js 22 image runs as the non-root `node` user and contains compiled code, production dependencies, and package metadata. Runtime credentials, tests, Git metadata, and host dependencies are excluded from the build context.
+
+Compose starts MySQL 8.4, waits for an authenticated TCP query to succeed, and runs pending migrations in a separate container. The API starts only after migrations exit successfully. Redis 7.4 is started alongside them; Redis readiness does not gate API startup. The API healthcheck expects a `400` response to an empty identity request, checking HTTP routing and validation without creating a mapping. It does not check database readiness after startup.
+
+The API is available at `http://localhost:3000`, or the host port selected by `PORT`. Only the API port is published, bound to `127.0.0.1`. MySQL and Redis remain on the Compose network. Container connections use `mysql:3306` and `redis:6379`; Compose overrides the local hostnames, backend ports, `NODE_ENV`, and internal API port. The bundled Redis uses the default user, so `REDIS_USERNAME` is ignored by Compose. Set `REDIS_ENABLED=false` to run the API without caching.
+
+Inspect application logs or rerun the compiled migrations with:
+
+```bash
+docker compose logs app migrate
+docker compose run --rm migrate
+```
+
+The production image does not include the Nest CLI. The migration service therefore invokes the compiled TypeORM CLI directly; the host's `npm run migration:*` commands are for the manual setup below.
+
+Stop the stack while preserving database records with:
+
+```bash
+docker compose down
+```
+
+MySQL data persists in a project-scoped named volume. Redis persistence is disabled and its cache rebuilds from MySQL. Database names, accounts, and passwords are initialized only when the MySQL volume is empty; editing `.env` does not change an existing database account. Change existing credentials through MySQL administration, then update `.env` and recreate the application containers.
+
+For disposable local data only, `docker compose down --volumes` deletes the database volume and all stored mappings. This Compose setup is intended for local evaluation; production deployment needs its own secret management, network access policy, and database backup procedure.
+
+Container verification passed with Node.js 22.23.4, MySQL 8.4.13, Redis 7.4.12, and Compose 5.3.1. Checks covered cold startup, migration reruns, concurrent HTTP requests, non-root execution, Redis-unavailable startup, disabled caching, and persistent IDs after recreating the stack. All 37 integration tests also passed in a separate Linux test container against a dedicated database in that stack.
 
 ## Set up the database
 
@@ -45,22 +87,23 @@ cp .env.example .env
 
 Edit `.env` and set `MYSQL_PASSWORD` to the generated password. Quote the value so characters such as `#` are preserved. The example deliberately has a blank password, which fails configuration validation until supplied. Keep `.env` and real credentials out of Git.
 
-| Variable            | Required | Default       | Purpose                                                                                |
-| ------------------- | -------- | ------------- | -------------------------------------------------------------------------------------- |
-| `NODE_ENV`          | No       | `development` | `development`, `test`, or `production`                                                 |
-| `PORT`              | No       | `3000`        | HTTP listening port                                                                    |
-| `MYSQL_HOST`        | Yes      | None          | Database host; local example uses `127.0.0.1`                                          |
-| `MYSQL_PORT`        | No       | `3306`        | Database TCP port                                                                      |
-| `MYSQL_DATABASE`    | Yes      | None          | Database name                                                                          |
-| `MYSQL_USER`        | Yes      | None          | Database account                                                                       |
-| `MYSQL_PASSWORD`    | Yes      | None          | Nonempty database password                                                             |
-| `REDIS_ENABLED`     | No       | `true`        | Enables caching; accepts `true` or `false`                                             |
-| `REDIS_HOST`        | No       | `127.0.0.1`   | Redis host                                                                             |
-| `REDIS_PORT`        | No       | `6379`        | Redis TCP port                                                                         |
-| `REDIS_USERNAME`    | No       | Empty         | Optional ACL username, preserved without trimming                                      |
-| `REDIS_PASSWORD`    | No       | Empty         | Optional password, preserved without trimming                                          |
-| `REDIS_TTL_SECONDS` | No       | `300`         | Cache lifetime in seconds, from `1` to `86400`                                         |
-| `REDIS_TIMEOUT_MS`  | No       | `200`         | Connection timeout and each GET/SET local deadline in milliseconds, from `1` to `5000` |
+| Variable              | Required     | Default       | Purpose                                                                                |
+| --------------------- | ------------ | ------------- | -------------------------------------------------------------------------------------- |
+| `NODE_ENV`            | No           | `development` | `development`, `test`, or `production`                                                 |
+| `PORT`                | No           | `3000`        | HTTP listening port                                                                    |
+| `MYSQL_HOST`          | Yes          | None          | Database host; local example uses `127.0.0.1`                                          |
+| `MYSQL_PORT`          | No           | `3306`        | Database TCP port                                                                      |
+| `MYSQL_DATABASE`      | Yes          | None          | Database name                                                                          |
+| `MYSQL_USER`          | Yes          | None          | Database account                                                                       |
+| `MYSQL_PASSWORD`      | Yes          | None          | Nonempty database password                                                             |
+| `MYSQL_ROOT_PASSWORD` | Compose only | None          | Initializes the local MySQL container; never passed to the application                 |
+| `REDIS_ENABLED`       | No           | `true`        | Enables caching; accepts `true` or `false`                                             |
+| `REDIS_HOST`          | No           | `127.0.0.1`   | Redis host                                                                             |
+| `REDIS_PORT`          | No           | `6379`        | Redis TCP port                                                                         |
+| `REDIS_USERNAME`      | No           | Empty         | Optional ACL username, preserved without trimming                                      |
+| `REDIS_PASSWORD`      | No           | Empty         | Optional password, preserved without trimming                                          |
+| `REDIS_TTL_SECONDS`   | No           | `300`         | Cache lifetime in seconds, from `1` to `86400`                                         |
+| `REDIS_TIMEOUT_MS`    | No           | `200`         | Connection timeout and each GET/SET local deadline in milliseconds, from `1` to `5000` |
 
 Environment variables take precedence over `.env`. Both the application and migration CLI validate the same configuration. Invalid configuration stops startup before a connection is attempted.
 
@@ -169,6 +212,8 @@ Mappings are immutable through this API: there are no update or delete endpoints
 | `test/integration/identity.integration.spec.ts`                        | Tests HTTP requests, migrations, persistence, concurrency, and caching with real backends        |
 | `test/helpers/`                                                        | Validates test configuration and manages isolated integration resources                          |
 | `jest.config.cjs`, `jest.integration.config.cjs`, `test/tsconfig.json` | Configures unit/integration discovery, TypeScript transformation, and coverage                   |
+| `Dockerfile`, `.dockerignore`                                          | Builds a non-root production image without local configuration or development dependencies       |
+| `compose.yaml`                                                         | Runs the API, migration job, MySQL 8.4, and Redis 7.4 for local evaluation                       |
 
 ## Development checks
 

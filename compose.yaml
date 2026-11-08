@@ -1,0 +1,96 @@
+x-application: &application
+  image: ${COMPOSE_PROJECT_NAME:-mediconcen}:local
+  build:
+    context: .
+    target: runtime
+  environment:
+    NODE_ENV: production
+    PORT: '3000'
+    MYSQL_HOST: mysql
+    MYSQL_PORT: '3306'
+    MYSQL_DATABASE: ${MYSQL_DATABASE:-mediconcen}
+    MYSQL_USER: ${MYSQL_USER:-mediconcen}
+    MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+    REDIS_ENABLED: ${REDIS_ENABLED:-true}
+    REDIS_HOST: redis
+    REDIS_PORT: '6379'
+    REDIS_USERNAME: ''
+    REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    REDIS_TTL_SECONDS: ${REDIS_TTL_SECONDS:-300}
+    REDIS_TIMEOUT_MS: ${REDIS_TIMEOUT_MS:-200}
+
+services:
+  app:
+    <<: *application
+    init: true
+    ports:
+      - '127.0.0.1:${PORT:-3000}:3000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3000/users/resolve', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).then(r => process.exit(r.status === 400 ? 0 : 1)).catch(() => process.exit(1))
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    stop_grace_period: 15s
+
+  migrate:
+    <<: *application
+    command:
+      - node
+      - node_modules/typeorm/cli.js
+      - migration:run
+      - -d
+      - dist/database/data-source.js
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: 'no'
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-mediconcen}
+      MYSQL_USER: ${MYSQL_USER:-mediconcen}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_bin
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - MYSQL_PWD="$$MYSQL_PASSWORD" mysql --protocol=TCP --host=127.0.0.1 --user="$$MYSQL_USER" --database="$$MYSQL_DATABASE" --silent --execute='SELECT 1' > /dev/null
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    user: redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    command:
+      - sh
+      - -c
+      - exec redis-server --save "" --appendonly no --requirepass "$$REDIS_PASSWORD"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q '^PONG$$'
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  mysql-data:
