@@ -2,12 +2,13 @@
 
 NestJS and TypeScript project for resolving an ordered pair of identifiers to a persistent user ID in MySQL.
 
-The current stage provides a validated POST endpoint, UUID v4 generation, MySQL persistence, and duplicate-request handling. Redis integration, a reusable automated test suite, Docker packaging, and OpenAPI documentation are scheduled for later stages.
+The current stage provides a validated POST endpoint, UUID v4 generation, MySQL persistence, duplicate-request handling, and Redis caching. A reusable automated test suite, Docker packaging, and OpenAPI documentation are scheduled for later stages.
 
 ## Prerequisites
 
 - Node.js 22.13 or later within 22.x, or Node.js 24.11 or later, with npm.
 - MySQL 8.0.18 or later within 8.x, with access to create a local database and account.
+- Redis for caching; the application also runs with Redis unavailable or explicitly disabled.
 
 The setup below uses [MySQL-generated passwords](https://dev.mysql.com/doc/refman/8.0/en/password-management.html), available from 8.0.18. Persistence checks were run against MySQL 8.0.46.
 
@@ -25,6 +26,16 @@ GRANT SELECT, INSERT, DELETE, CREATE, ALTER, INDEX, DROP
 
 Save the returned generated password for the next step. These permissions cover local development and migrations; a deployed application account can be restricted to `SELECT` and `INSERT` after migrations are applied separately.
 
+## Start a local Redis server
+
+For a disposable local cache, run Redis in another terminal:
+
+```bash
+redis-server --bind 127.0.0.1 --port 6379 --protected-mode yes --save "" --appendonly no
+```
+
+This instance accepts loopback connections and disables persistence. Redis persistence is optional because the cache can be rebuilt from MySQL. To use authenticated Redis, configure its ACL credentials through `REDIS_USERNAME` and `REDIS_PASSWORD` in the ignored `.env` file. Set `REDIS_ENABLED=false` for database-only operation.
+
 ## Install and configure
 
 ```bash
@@ -34,15 +45,22 @@ cp .env.example .env
 
 Edit `.env` and set `MYSQL_PASSWORD` to the generated password. Quote the value so characters such as `#` are preserved. The example deliberately has a blank password, which fails configuration validation until supplied. Keep `.env` and real credentials out of Git.
 
-| Variable         | Required | Default       | Purpose                                       |
-| ---------------- | -------- | ------------- | --------------------------------------------- |
-| `NODE_ENV`       | No       | `development` | `development`, `test`, or `production`        |
-| `PORT`           | No       | `3000`        | HTTP listening port                           |
-| `MYSQL_HOST`     | Yes      | None          | Database host; local example uses `127.0.0.1` |
-| `MYSQL_PORT`     | No       | `3306`        | Database TCP port                             |
-| `MYSQL_DATABASE` | Yes      | None          | Database name                                 |
-| `MYSQL_USER`     | Yes      | None          | Database account                              |
-| `MYSQL_PASSWORD` | Yes      | None          | Nonempty database password                    |
+| Variable            | Required | Default       | Purpose                                                                                |
+| ------------------- | -------- | ------------- | -------------------------------------------------------------------------------------- |
+| `NODE_ENV`          | No       | `development` | `development`, `test`, or `production`                                                 |
+| `PORT`              | No       | `3000`        | HTTP listening port                                                                    |
+| `MYSQL_HOST`        | Yes      | None          | Database host; local example uses `127.0.0.1`                                          |
+| `MYSQL_PORT`        | No       | `3306`        | Database TCP port                                                                      |
+| `MYSQL_DATABASE`    | Yes      | None          | Database name                                                                          |
+| `MYSQL_USER`        | Yes      | None          | Database account                                                                       |
+| `MYSQL_PASSWORD`    | Yes      | None          | Nonempty database password                                                             |
+| `REDIS_ENABLED`     | No       | `true`        | Enables caching; accepts `true` or `false`                                             |
+| `REDIS_HOST`        | No       | `127.0.0.1`   | Redis host                                                                             |
+| `REDIS_PORT`        | No       | `6379`        | Redis TCP port                                                                         |
+| `REDIS_USERNAME`    | No       | Empty         | Optional ACL username, preserved without trimming                                      |
+| `REDIS_PASSWORD`    | No       | Empty         | Optional password, preserved without trimming                                          |
+| `REDIS_TTL_SECONDS` | No       | `300`         | Cache lifetime in seconds, from `1` to `86400`                                         |
+| `REDIS_TIMEOUT_MS`  | No       | `200`         | Connection timeout and each GET/SET local deadline in milliseconds, from `1` to `5000` |
 
 Environment variables take precedence over `.env`. Both the application and migration CLI validate the same configuration. Invalid configuration stops startup before a connection is attempted.
 
@@ -113,27 +131,40 @@ Errors use `{ statusCode, error, message }`; `message` is a string or an array o
 - The repository uses TypeORM `insert` rather than `save`, so an existing primary key cannot be silently updated.
 - Concurrent requests can both miss the initial lookup. The unique index permits one insert; on a duplicate-key error, the service rereads the pair and returns the persisted winner. An unrelated primary-key collision is rethrown if no matching pair exists. This flow uses MySQL autocommit without an explicit transaction or Redis lock.
 - The application and CLI share database options. Automatic schema synchronization and migration execution on startup are disabled; schema changes use versioned migrations.
-- MySQL remains the permanent source of truth. Redis behavior will be added in a later stage.
+- MySQL remains the permanent source of truth; Redis stores only temporary copies of confirmed mappings.
+
+## Cache behavior
+
+- Reads check Redis first. A miss resolves the pair through MySQL, then caches the existing ID, successfully inserted ID, or duplicate-insert winner. Cache failures never turn a successful database result into an API failure.
+- Keys use `mediconcen:identity:v1:` followed by the SHA-256 digest of `JSON.stringify([id1, id2])`, preserving pair order and identifier distinctions without ambiguous delimiters.
+- Values must be lowercase canonical UUID v4 strings. Invalid values and wrong-type entries become misses and are replaced after successful database resolution. Missing records are not cached, and cache hits do not extend the TTL.
+- Startup connects in the background. An error listener handles client failures, reconnection delays range from 100 to 2000 ms, offline queuing is disabled, and at most 128 commands can be pending. GET/SET failures or deadlines fall back to MySQL or skip the cache write. Shutdown destroys the client.
+- With defaults, a cache miss can add a 200 ms read wait and a 200 ms write wait around database work. These are local timer deadlines; event-loop scheduling affects elapsed time. A SET already written to Redis can complete after its deadline with the confirmed database ID.
+- TTL expiry, cache flushes, and Redis restart loss do not change MySQL IDs. During a MySQL outage, cache hits can serve previously stored mappings until expiration; uncached requests return `503` for recognized transient database failures.
+
+Mappings are immutable through this API: there are no update or delete endpoints. The cache namespace must be trusted; UUID shape validation cannot detect a wrong but valid UUID. After manual database changes or restores, invalidate only the application's `mediconcen:identity:v1:*` namespace before serving requests to avoid stale mappings.
 
 ## Project structure
 
-| File                                                                | Responsibility                                                  |
-| ------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `src/main.ts`                                                       | Bootstraps NestJS and enables shutdown hooks                    |
-| `src/app.module.ts`                                                 | Wires modules and global `APP_PIPE`/`APP_FILTER` providers      |
-| `src/config/environment.ts`                                         | Validates and types environment configuration                   |
-| `src/database/database.options.ts`                                  | Defines shared TypeORM connection and schema options            |
-| `src/database/database.module.ts`                                   | Configures the NestJS database connection                       |
-| `src/database/data-source.ts`                                       | Exports the standalone migration data source                    |
-| `src/database/database-errors.ts`                                   | Classifies duplicate-key and transient database errors          |
-| `src/database/migrations/1794096000000-create-identity-mappings.ts` | Creates and removes the identity table                          |
-| `src/identity/identity.entity.ts`                                   | Maps identity columns and the composite unique index            |
-| `src/identity/identity.controller.ts`                               | Exposes `POST /users/resolve`                                   |
-| `src/identity/identity.service.ts`                                  | Resolves pairs, generates UUIDs, and recovers duplicate inserts |
-| `src/identity/dto/`                                                 | Defines request validation and code-point length checking       |
-| `src/identity/identity.repository.ts`                               | Looks up pairs and inserts mappings                             |
-| `src/common/pipes/request-validation.pipe.ts`                       | Configures strict global request validation                     |
-| `src/common/filters/api-exception.filter.ts`                        | Returns consistent API errors and generic server logs           |
+| File                                                                | Responsibility                                                                      |
+| ------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `src/main.ts`                                                       | Bootstraps NestJS and enables shutdown hooks                                        |
+| `src/app.module.ts`                                                 | Wires modules and global `APP_PIPE`/`APP_FILTER` providers                          |
+| `src/config/environment.ts`                                         | Validates and types environment configuration                                       |
+| `src/cache/cache.module.ts`                                         | Registers and exports the identity cache                                            |
+| `src/cache/identity-cache.service.ts`                               | Manages Redis lifecycle, cache keys, validation, TTL, and fallback                  |
+| `src/database/database.options.ts`                                  | Defines shared TypeORM connection and schema options                                |
+| `src/database/database.module.ts`                                   | Configures the NestJS database connection                                           |
+| `src/database/data-source.ts`                                       | Exports the standalone migration data source                                        |
+| `src/database/database-errors.ts`                                   | Classifies duplicate-key and transient database errors                              |
+| `src/database/migrations/1794096000000-create-identity-mappings.ts` | Creates and removes the identity table                                              |
+| `src/identity/identity.entity.ts`                                   | Maps identity columns and the composite unique index                                |
+| `src/identity/identity.controller.ts`                               | Exposes `POST /users/resolve`                                                       |
+| `src/identity/identity.service.ts`                                  | Resolves pairs through cache/MySQL, generates UUIDs, and recovers duplicate inserts |
+| `src/identity/dto/`                                                 | Defines request validation and code-point length checking                           |
+| `src/identity/identity.repository.ts`                               | Looks up pairs and inserts mappings                                                 |
+| `src/common/pipes/request-validation.pipe.ts`                       | Configures strict global request validation                                         |
+| `src/common/filters/api-exception.filter.ts`                        | Returns consistent API errors and generic server logs                               |
 
 ## Development checks
 
