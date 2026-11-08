@@ -1,18 +1,10 @@
 # MediconCen
 
-NestJS and TypeScript project for resolving an ordered pair of identifiers to a persistent user ID in MySQL.
+NestJS and TypeScript REST API that maps each ordered pair of identifiers to a persistent UUID v4 `userID` in MySQL 8.
 
-The project provides a validated POST endpoint, UUID v4 generation, MySQL persistence, duplicate-request handling, Redis caching, automated unit and integration tests, and Docker packaging. OpenAPI documentation is scheduled for the final stage.
+The API validates requests, creates UUID v4 mappings, handles concurrent inserts, and uses Redis as an optional cache. MySQL remains the permanent source of truth. [Sequence diagrams](docs/sequence.md) show the resolution and concurrency flows.
 
-## Prerequisites
-
-- Node.js 22.13 or later within 22.x, or Node.js 24.11 or later, with npm.
-- MySQL 8.0.18 or later within 8.x, with access to create a local database and account.
-- Redis for caching; the application also runs with Redis unavailable or explicitly disabled.
-
-The setup below uses [MySQL-generated passwords](https://dev.mysql.com/doc/refman/8.0/en/password-management.html), available from 8.0.18.
-
-## Run with Docker Compose
+## Quick start with Docker
 
 Docker Engine with Compose 2.20 or later can run the complete stack without installing Node.js, MySQL, or Redis on the host. Start Docker, then configure the ignored environment file:
 
@@ -33,6 +25,15 @@ Compose starts MySQL 8.4, waits for an authenticated TCP query to succeed, and r
 
 The API is available at `http://localhost:3000`, or the host port selected by `PORT`. Only the API port is published, bound to `127.0.0.1`. MySQL and Redis remain on the Compose network. Container connections use `mysql:3306` and `redis:6379`; Compose overrides the local hostnames, backend ports, `NODE_ENV`, and internal API port. The bundled Redis uses the default user, so `REDIS_USERNAME` is ignored by Compose. Set `REDIS_ENABLED=false` to run the API without caching.
 
+| Resource          | Default URL                                                        |
+| ----------------- | ------------------------------------------------------------------ |
+| Identity endpoint | `POST http://localhost:3000/users/resolve`                         |
+| Swagger UI        | [http://localhost:3000/docs](http://localhost:3000/docs)           |
+| OpenAPI JSON      | [http://localhost:3000/docs-json](http://localhost:3000/docs-json) |
+| OpenAPI YAML      | [http://localhost:3000/docs-yaml](http://localhost:3000/docs-yaml) |
+
+All URLs use the default host port. Adjust them when changing `PORT`.
+
 Inspect application logs or rerun the compiled migrations with:
 
 ```bash
@@ -52,9 +53,17 @@ MySQL data persists in a project-scoped named volume. Redis persistence is disab
 
 For disposable local data only, `docker compose down --volumes` deletes the database volume and all stored mappings. This Compose setup is intended for local evaluation; production deployment needs its own secret management, network access policy, and database backup procedure.
 
-Container verification passed with Node.js 22.23.4, MySQL 8.4.13, Redis 7.4.12, and Compose 5.3.1. Checks covered cold startup, migration reruns, concurrent HTTP requests, non-root execution, Redis-unavailable startup, disabled caching, and persistent IDs after recreating the stack. All 37 integration tests also passed in a separate Linux test container against a dedicated database in that stack.
+## Run without Docker
 
-## Set up the database
+Prerequisites:
+
+- Node.js 22.13 or later within 22.x, or Node.js 24.11 or later, with npm.
+- MySQL 8.0.18 or later within 8.x, with access to create a local database and account.
+- Redis when caching is enabled; set `REDIS_ENABLED=false` for database-only operation.
+
+The SQL below uses [MySQL-generated passwords](https://dev.mysql.com/doc/refman/8.0/en/password-management.html), available from MySQL 8.0.18.
+
+### Set up the database
 
 Connect to MySQL as an administrator and run:
 
@@ -68,7 +77,7 @@ GRANT SELECT, INSERT, DELETE, CREATE, ALTER, INDEX, DROP
 
 Save the returned generated password for the next step. These permissions cover local development and migrations; a deployed application account can be restricted to `SELECT` and `INSERT` after migrations are applied separately.
 
-## Start a local Redis server
+### Start a local Redis server
 
 For a disposable local cache, run Redis in another terminal:
 
@@ -78,14 +87,35 @@ redis-server --bind 127.0.0.1 --port 6379 --protected-mode yes --save "" --appen
 
 This instance accepts loopback connections and disables persistence. Redis persistence is optional because the cache can be rebuilt from MySQL. To use authenticated Redis, configure its ACL credentials through `REDIS_USERNAME` and `REDIS_PASSWORD` in the ignored `.env` file. Set `REDIS_ENABLED=false` for database-only operation.
 
-## Install and configure
+### Install and configure
 
 ```bash
 npm ci
 cp .env.example .env
 ```
 
-Edit `.env` and set `MYSQL_PASSWORD` to the generated password. Quote the value so characters such as `#` are preserved. The example deliberately has a blank password, which fails configuration validation until supplied. Keep `.env` and real credentials out of Git.
+Edit `.env` and set `MYSQL_PASSWORD` to the generated password. Quote the value so characters such as `#` are preserved. The example deliberately has a blank password, which fails configuration validation until supplied. `MYSQL_ROOT_PASSWORD` is required only for Compose. Keep `.env` and real credentials out of Git.
+
+```bash
+npm run migration:run
+npm run migration:show
+npm run start:dev
+```
+
+The migration commands compile the project before using the standalone TypeORM data source. Repeated `migration:run` calls apply only pending migrations. The database must already exist; application startup does not create or migrate tables.
+
+For a compiled application:
+
+```bash
+npm run build
+npm run start:prod
+```
+
+The default HTTP port is `3000`. A running application requires an available MySQL server and valid credentials. Apply migrations before sending requests.
+
+## Configuration
+
+The table describes application defaults. Compose overrides container hostnames, backend ports, `NODE_ENV`, the internal HTTP port, and the Redis username as described above.
 
 | Variable              | Required     | Default       | Purpose                                                                                |
 | --------------------- | ------------ | ------------- | -------------------------------------------------------------------------------------- |
@@ -106,25 +136,6 @@ Edit `.env` and set `MYSQL_PASSWORD` to the generated password. Quote the value 
 | `REDIS_TIMEOUT_MS`    | No           | `200`         | Connection timeout and each GET/SET local deadline in milliseconds, from `1` to `5000` |
 
 Environment variables take precedence over `.env`. Both the application and migration CLI validate the same configuration. Invalid configuration stops startup before a connection is attempted.
-
-## Apply migrations and start
-
-```bash
-npm run migration:run
-npm run migration:show
-npm run start:dev
-```
-
-The migration commands compile the project before using the standalone TypeORM data source. Repeated `migration:run` calls apply only pending migrations. The database must already exist.
-
-For a compiled application:
-
-```bash
-npm run build
-npm run start:prod
-```
-
-The default port is `3000`. A running application requires an available MySQL server and valid credentials. Apply migrations before sending requests; startup does not check or create the table.
 
 ## Resolve an identity
 
@@ -147,6 +158,10 @@ Both a new pair and an existing pair return HTTP `200` with only `userID`:
 The UUID above is illustrative. Repeat the same request to receive the same stored value. A new pair receives a UUID v4 generated with `crypto.randomUUID()` and returned only after persistence succeeds.
 
 Both identifiers must be nonblank strings containing valid Unicode and at most 255 Unicode code points. Missing values, empty or whitespace-only strings, lone surrogates, non-string values, and extra properties are rejected. Values are neither trimmed nor coerced. Code-point counting includes variation selectors to match the database character limit.
+
+Swagger UI at `/docs` describes the endpoint, request constraints, examples and response schemas. The same OpenAPI document is available as JSON at `/docs-json` and YAML at `/docs-yaml`.
+
+The API has no authentication. Compose publishes it on loopback for local evaluation.
 
 Errors use `{ statusCode, error, message }`; `message` is a string or an array of validation messages. Responses and API filter logs exclude SQL, query parameters, and underlying driver errors.
 
@@ -205,15 +220,20 @@ Mappings are immutable through this API: there are no update or delete endpoints
 | `src/identity/identity.controller.ts`                                  | Exposes `POST /users/resolve`                                                                    |
 | `src/identity/identity.service.ts`                                     | Resolves pairs through cache/MySQL, generates UUIDs, and recovers duplicate inserts              |
 | `src/identity/dto/`                                                    | Defines request validation and code-point length checking                                        |
+| `src/identity/dto/resolved-identity.dto.ts`                            | Documents the UUID response schema                                                               |
 | `src/identity/identity.repository.ts`                                  | Looks up pairs and inserts mappings                                                              |
 | `src/common/pipes/request-validation.pipe.ts`                          | Configures strict global request validation                                                      |
 | `src/common/filters/api-exception.filter.ts`                           | Returns consistent API errors and generic server logs                                            |
+| `src/common/dto/api-error.dto.ts`                                      | Documents the shared API error shape                                                             |
+| `src/documentation/swagger.ts`                                         | Generates OpenAPI and serves Swagger UI, JSON and YAML                                           |
 | `test/unit/`                                                           | Tests services, validation, configuration, caching, and error handling without external services |
+| `test/unit/openapi.spec.ts`                                            | Checks published schemas, documentation routes and response examples                             |
 | `test/integration/identity.integration.spec.ts`                        | Tests HTTP requests, migrations, persistence, concurrency, and caching with real backends        |
 | `test/helpers/`                                                        | Validates test configuration and manages isolated integration resources                          |
 | `jest.config.cjs`, `jest.integration.config.cjs`, `test/tsconfig.json` | Configures unit/integration discovery, TypeScript transformation, and coverage                   |
 | `Dockerfile`, `.dockerignore`                                          | Builds a non-root production image without local configuration or development dependencies       |
 | `compose.yaml`                                                         | Runs the API, migration job, MySQL 8.4, and Redis 7.4 for local evaluation                       |
+| `docs/sequence.md`                                                     | Shows validation, cache/database resolution and concurrent-insert recovery                       |
 
 ## Development checks
 
@@ -263,7 +283,11 @@ npm run test:integration
 
 The fixture holds a MySQL named lock and refuses a nonempty database. It applies migrations and, during cleanup, drops only its `identity_mappings` and `migrations` tables. The account therefore needs the scoped DDL permissions shown above. Redis tests use database 0 and delete only tracked, run-specific cache keys; they do not flush Redis or stop either server. Missing configuration or unavailable services fail the suite rather than silently skipping it.
 
-Integration checks passed against MySQL 8.0.46 and Redis 7.4.12 with Jest's `--detectOpenHandles` option. HTTP database-error scenarios inject repository failures; they do not stop a database server or establish behavior during a server-wide outage.
+Verification snapshot on 2026-11-08: 133 unit tests across 8 suites and 37 integration tests passed. Container verification used Node.js 22.23.4, MySQL 8.4.13, Redis 7.4.12 and Compose 5.3.1. Cold startup, idempotent migrations, 16 concurrent first requests, Redis unavailability, database-only operation and persistence across a full container restart with the volume retained passed. Integration checks also passed previously against MySQL 8.0.46 and Redis 7.4.12 with Jest's `--detectOpenHandles` option.
+
+The compiled Docker application served all three documentation routes, and Swagger UI's request example returned HTTP `200`. The JSON and YAML specifications passed OpenAPI 3.0 validation and matched each other. Both sequence diagrams were rendered and visually checked.
+
+HTTP database-error scenarios inject repository failures; they do not stop a database server or establish behavior during a server-wide outage. Cache UUID validation checks shape, not provenance; a trusted cache namespace is part of the configuration contract.
 
 ## Revert a local migration
 
