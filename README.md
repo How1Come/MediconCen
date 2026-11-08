@@ -159,6 +159,8 @@ The UUID above is illustrative. Repeat the same request to receive the same stor
 
 Both identifiers must be nonblank strings containing valid Unicode and at most 255 Unicode code points. Missing values, empty or whitespace-only strings, lone surrogates, non-string values, and extra properties are rejected. Values are neither trimmed nor coerced. Code-point counting includes variation selectors to match the database character limit.
 
+Nested identifier values and reserved object-property names are rejected before transformation.
+
 Swagger UI at `/docs` describes the endpoint, request constraints, examples and response schemas. The same OpenAPI document is available as JSON at `/docs-json` and YAML at `/docs-yaml`.
 
 The API has no authentication. Compose publishes it on loopback for local evaluation.
@@ -206,7 +208,7 @@ Mappings are immutable through this API: there are no update or delete endpoints
 
 | File                                                                   | Responsibility                                                                                   |
 | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `src/main.ts`                                                          | Bootstraps NestJS and enables shutdown hooks                                                     |
+| `src/main.ts`                                                          | Bootstraps NestJS, enables shutdown hooks, and cleans up after failed startup                    |
 | `src/app.module.ts`                                                    | Wires modules and global `APP_PIPE`/`APP_FILTER` providers                                       |
 | `src/config/environment.ts`                                            | Validates and types environment configuration                                                    |
 | `src/cache/cache.module.ts`                                            | Registers and exports the identity cache                                                         |
@@ -228,6 +230,7 @@ Mappings are immutable through this API: there are no update or delete endpoints
 | `src/documentation/swagger.ts`                                         | Generates OpenAPI and serves Swagger UI, JSON and YAML                                           |
 | `test/unit/`                                                           | Tests services, validation, configuration, caching, and error handling without external services |
 | `test/unit/openapi.spec.ts`                                            | Checks published schemas, documentation routes and response examples                             |
+| `test/unit/bootstrap.spec.ts`                                          | Checks startup success and cleanup after configuration, documentation and listen failures        |
 | `test/integration/identity.integration.spec.ts`                        | Tests HTTP requests, migrations, persistence, concurrency, and caching with real backends        |
 | `test/helpers/`                                                        | Validates test configuration and manages isolated integration resources                          |
 | `jest.config.cjs`, `jest.integration.config.cjs`, `test/tsconfig.json` | Configures unit/integration discovery, TypeScript transformation, and coverage                   |
@@ -283,11 +286,13 @@ npm run test:integration
 
 The fixture holds a MySQL named lock and refuses a nonempty database. It applies migrations and, during cleanup, drops only its `identity_mappings` and `migrations` tables. The account therefore needs the scoped DDL permissions shown above. Redis tests use database 0 and delete only tracked, run-specific cache keys; they do not flush Redis or stop either server. Missing configuration or unavailable services fail the suite rather than silently skipping it.
 
-Verification snapshot on 2026-11-08: 133 unit tests across 8 suites and 37 integration tests passed. Container verification used Node.js 22.23.4, MySQL 8.4.13, Redis 7.4.12 and Compose 5.3.1. Cold startup, idempotent migrations, 16 concurrent first requests, Redis unavailability, database-only operation and persistence across a full container restart with the volume retained passed. Integration checks also passed previously against MySQL 8.0.46 and Redis 7.4.12 with Jest's `--detectOpenHandles` option.
+Verification snapshot on 2026-11-08: 150 unit tests across 9 suites and 48 integration tests passed from a fresh repository checkout with the reviewed fixes. Container verification used Node.js 22.23.4, MySQL 8.4.13, Redis 7.4.12 and Compose 5.3.1. Cold startup, idempotent migrations, 16 concurrent first requests, Redis unavailability, database-only operation and persistence across a full container restart with the volume retained passed. Integration checks also passed previously against MySQL 8.0.46 and Redis 7.4.12 with Jest's `--detectOpenHandles` option.
 
 The compiled Docker application served all three documentation routes, and Swagger UI's request example returned HTTP `200`. The JSON and YAML specifications passed OpenAPI 3.0 validation and matched each other. Both sequence diagrams were rendered and visually checked.
 
-HTTP database-error scenarios inject repository failures; they do not stop a database server or establish behavior during a server-wide outage. Cache UUID validation checks shape, not provenance; a trusted cache namespace is part of the configuration contract.
+HTTP database-error scenarios in the integration suite inject repository failures. Separate runtime checks stopped and restarted MySQL and Redis: the API served warm cache entries, returned sanitized `503` errors for uncached requests during MySQL downtime, and recovered without an application restart. Temporarily renaming the table produced a sanitized `500`, followed by successful requests after restoration. Occupied-port and unavailable-database startup checks exited with code `1`; initialized resources are closed after post-creation startup failures.
+
+Cache UUID validation checks shape, not provenance; a trusted cache namespace is part of the configuration contract.
 
 ## Revert a local migration
 
