@@ -2,7 +2,7 @@
 
 NestJS and TypeScript project for resolving an ordered pair of identifiers to a persistent user ID in MySQL.
 
-The current stage provides a validated POST endpoint, UUID v4 generation, MySQL persistence, duplicate-request handling, and Redis caching. A reusable automated test suite, Docker packaging, and OpenAPI documentation are scheduled for later stages.
+The current stage provides a validated POST endpoint, UUID v4 generation, MySQL persistence, duplicate-request handling, Redis caching, and automated unit and integration tests. Docker packaging and OpenAPI documentation are scheduled for later stages.
 
 ## Prerequisites
 
@@ -10,7 +10,7 @@ The current stage provides a validated POST endpoint, UUID v4 generation, MySQL 
 - MySQL 8.0.18 or later within 8.x, with access to create a local database and account.
 - Redis for caching; the application also runs with Redis unavailable or explicitly disabled.
 
-The setup below uses [MySQL-generated passwords](https://dev.mysql.com/doc/refman/8.0/en/password-management.html), available from 8.0.18. Persistence checks were run against MySQL 8.0.46.
+The setup below uses [MySQL-generated passwords](https://dev.mysql.com/doc/refman/8.0/en/password-management.html), available from 8.0.18.
 
 ## Set up the database
 
@@ -146,25 +146,29 @@ Mappings are immutable through this API: there are no update or delete endpoints
 
 ## Project structure
 
-| File                                                                | Responsibility                                                                      |
-| ------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `src/main.ts`                                                       | Bootstraps NestJS and enables shutdown hooks                                        |
-| `src/app.module.ts`                                                 | Wires modules and global `APP_PIPE`/`APP_FILTER` providers                          |
-| `src/config/environment.ts`                                         | Validates and types environment configuration                                       |
-| `src/cache/cache.module.ts`                                         | Registers and exports the identity cache                                            |
-| `src/cache/identity-cache.service.ts`                               | Manages Redis lifecycle, cache keys, validation, TTL, and fallback                  |
-| `src/database/database.options.ts`                                  | Defines shared TypeORM connection and schema options                                |
-| `src/database/database.module.ts`                                   | Configures the NestJS database connection                                           |
-| `src/database/data-source.ts`                                       | Exports the standalone migration data source                                        |
-| `src/database/database-errors.ts`                                   | Classifies duplicate-key and transient database errors                              |
-| `src/database/migrations/1794096000000-create-identity-mappings.ts` | Creates and removes the identity table                                              |
-| `src/identity/identity.entity.ts`                                   | Maps identity columns and the composite unique index                                |
-| `src/identity/identity.controller.ts`                               | Exposes `POST /users/resolve`                                                       |
-| `src/identity/identity.service.ts`                                  | Resolves pairs through cache/MySQL, generates UUIDs, and recovers duplicate inserts |
-| `src/identity/dto/`                                                 | Defines request validation and code-point length checking                           |
-| `src/identity/identity.repository.ts`                               | Looks up pairs and inserts mappings                                                 |
-| `src/common/pipes/request-validation.pipe.ts`                       | Configures strict global request validation                                         |
-| `src/common/filters/api-exception.filter.ts`                        | Returns consistent API errors and generic server logs                               |
+| File                                                                   | Responsibility                                                                                   |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `src/main.ts`                                                          | Bootstraps NestJS and enables shutdown hooks                                                     |
+| `src/app.module.ts`                                                    | Wires modules and global `APP_PIPE`/`APP_FILTER` providers                                       |
+| `src/config/environment.ts`                                            | Validates and types environment configuration                                                    |
+| `src/cache/cache.module.ts`                                            | Registers and exports the identity cache                                                         |
+| `src/cache/identity-cache.service.ts`                                  | Manages Redis lifecycle, cache keys, validation, TTL, and fallback                               |
+| `src/database/database.options.ts`                                     | Defines shared TypeORM connection and schema options                                             |
+| `src/database/database.module.ts`                                      | Configures the NestJS database connection                                                        |
+| `src/database/data-source.ts`                                          | Exports the standalone migration data source                                                     |
+| `src/database/database-errors.ts`                                      | Classifies duplicate-key and transient database errors                                           |
+| `src/database/migrations/1794096000000-create-identity-mappings.ts`    | Creates and removes the identity table                                                           |
+| `src/identity/identity.entity.ts`                                      | Maps identity columns and the composite unique index                                             |
+| `src/identity/identity.controller.ts`                                  | Exposes `POST /users/resolve`                                                                    |
+| `src/identity/identity.service.ts`                                     | Resolves pairs through cache/MySQL, generates UUIDs, and recovers duplicate inserts              |
+| `src/identity/dto/`                                                    | Defines request validation and code-point length checking                                        |
+| `src/identity/identity.repository.ts`                                  | Looks up pairs and inserts mappings                                                              |
+| `src/common/pipes/request-validation.pipe.ts`                          | Configures strict global request validation                                                      |
+| `src/common/filters/api-exception.filter.ts`                           | Returns consistent API errors and generic server logs                                            |
+| `test/unit/`                                                           | Tests services, validation, configuration, caching, and error handling without external services |
+| `test/integration/identity.integration.spec.ts`                        | Tests HTTP requests, migrations, persistence, concurrency, and caching with real backends        |
+| `test/helpers/`                                                        | Validates test configuration and manages isolated integration resources                          |
+| `jest.config.cjs`, `jest.integration.config.cjs`, `test/tsconfig.json` | Configures unit/integration discovery, TypeScript transformation, and coverage                   |
 
 ## Development checks
 
@@ -175,7 +179,46 @@ npm run format:check
 npm run build
 ```
 
-There is no `npm test` command or automated test suite at this stage.
+## Run tests
+
+| Command                    | Scope                                        | Services required |
+| -------------------------- | -------------------------------------------- | ----------------- |
+| `npm test`                 | Unit tests                                   | None              |
+| `npm run test:cov`         | Unit tests with coverage in `coverage/unit/` | None              |
+| `npm run test:integration` | Integration tests                            | MySQL 8 and Redis |
+| `npm run test:all`         | Unit tests followed by integration tests     | MySQL 8 and Redis |
+
+Unit coverage excludes application bootstrap, the migration CLI data source, and migration files. The integration suite applies migrations to a fresh database and checks the resulting schema. Jest is configured without Watchman.
+
+### Configure integration tests
+
+Use a dedicated, empty database and a database-scoped test account. Connect to MySQL as an administrator and run:
+
+```sql
+CREATE DATABASE mediconcen_test
+  CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE USER 'mediconcen_test'@'127.0.0.1' IDENTIFIED BY RANDOM PASSWORD;
+GRANT SELECT, INSERT, DELETE, CREATE, ALTER, INDEX, DROP
+  ON `mediconcen\_test`.* TO 'mediconcen_test'@'127.0.0.1';
+```
+
+The escaped underscore in the grant keeps the database scope literal. Save the generated password, then create the ignored test configuration:
+
+```bash
+cp .env.test.example .env.test
+```
+
+Set `TEST_MYSQL_PASSWORD` to that password. `TEST_MYSQL_DATABASE`, `TEST_MYSQL_USER`, and `TEST_MYSQL_PASSWORD` are required; application `MYSQL_*` credentials are never used as fallbacks. The database name must be `mediconcen_test` or `mediconcen_test_<suffix>`, with lowercase letters/digits in suffix components, optional separating underscores, and a maximum of 64 characters.
+
+`TEST_MYSQL_HOST` and `TEST_MYSQL_PORT` default to `127.0.0.1:3306`. `TEST_REDIS_HOST` and `TEST_REDIS_PORT` default to `127.0.0.1:6379`; `TEST_REDIS_USERNAME` and `TEST_REDIS_PASSWORD` are optional and default to empty strings. Start both services before running:
+
+```bash
+npm run test:integration
+```
+
+The fixture holds a MySQL named lock and refuses a nonempty database. It applies migrations and, during cleanup, drops only its `identity_mappings` and `migrations` tables. The account therefore needs the scoped DDL permissions shown above. Redis tests use database 0 and delete only tracked, run-specific cache keys; they do not flush Redis or stop either server. Missing configuration or unavailable services fail the suite rather than silently skipping it.
+
+Integration checks passed against MySQL 8.0.46 and Redis 7.4.12 with Jest's `--detectOpenHandles` option. HTTP database-error scenarios inject repository failures; they do not stop a database server or establish behavior during a server-wide outage.
 
 ## Revert a local migration
 
