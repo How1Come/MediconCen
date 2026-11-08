@@ -116,7 +116,28 @@ describe('Identity request validation', () => {
     expect(JSON.stringify(response)).not.toContain(value);
   });
 
-  it.each(['__proto__', 'constructor', 'prototype'])(
+  it('rejects nested identifier values before traversing them', async () => {
+    const nested = Object.defineProperty({}, 'value', {
+      enumerable: true,
+      get: () => {
+        throw new Error('Nested identifier values must not be traversed');
+      },
+    });
+
+    for (const field of ['id1', 'id2']) {
+      const response = await errorResponse({
+        id1: 'ABC123',
+        id2: 'XYZ456',
+        [field]: nested,
+      });
+      expect(response).toMatchObject({
+        statusCode: 400,
+        message: ['Request properties must be strings'],
+      });
+    }
+  });
+
+  it.each([...Object.getOwnPropertyNames(Object.prototype), 'prototype'])(
     'rejects an own %s field before class transformation',
     async (name) => {
       const value = randomUUID();

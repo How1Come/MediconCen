@@ -9,14 +9,25 @@ class RequestValidationPipe extends ValidationPipe {
     if (
       metadata.type === 'body' &&
       typeof value === 'object' &&
-      value !== null &&
-      ['__proto__', 'constructor', 'prototype'].some((key) =>
-        Object.hasOwn(value, key),
-      )
+      value !== null
     ) {
-      throw new BadRequestException([
-        'Request contains unsupported properties',
-      ]);
+      if (
+        Object.getOwnPropertyNames(value).some(
+          (key) => key === 'prototype' || Object.hasOwn(Object.prototype, key),
+        )
+      ) {
+        throw new BadRequestException([
+          'Request contains unsupported properties',
+        ]);
+      }
+
+      if (
+        Object.values(value).some(
+          (field: unknown) => field !== null && typeof field === 'object',
+        )
+      ) {
+        throw new BadRequestException(['Request properties must be strings']);
+      }
     }
 
     return super.transform(value, metadata);

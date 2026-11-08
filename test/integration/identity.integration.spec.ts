@@ -142,6 +142,7 @@ describe('Identity API with MySQL and Redis', () => {
     ['null field', { id1: null, id2: 'valid' }],
     ['numeric field', { id1: 123, id2: 'valid' }],
     ['array field', { id1: ['value'], id2: 'valid' }],
+    ['nested field', { id1: { nested: { value: 'value' } }, id2: 'valid' }],
     ['empty field', { id1: '', id2: 'valid' }],
     ['blank field', { id1: ' \n\t', id2: 'valid' }],
     ['oversized field', { id1: 'x'.repeat(256), id2: 'valid' }],
@@ -165,7 +166,11 @@ describe('Identity API with MySQL and Redis', () => {
     );
   });
 
-  it.each(['extra', '__proto__', 'constructor', 'prototype'])(
+  it.each([
+    'extra',
+    ...Object.getOwnPropertyNames(Object.prototype),
+    'prototype',
+  ])(
     'rejects the unsupported %s property without reflecting its name or value',
     async (name) => {
       const pair = fixture.pair(`unsupported-${name}`);
